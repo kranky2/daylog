@@ -55,6 +55,15 @@
         "bible-study"
       ],
       "focus": 3
+    },
+    {
+      "start": "15:45",
+      "end": "16:30",
+      "title": "Options learning tasty trade",
+      "tags": [
+        "options-theory"
+      ],
+      "focus": 3
     }
   ]
 }
