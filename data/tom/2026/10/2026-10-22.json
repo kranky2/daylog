@@ -19,6 +19,15 @@
         "options-theory"
       ],
       "focus": 3
+    },
+    {
+      "start": "15:15",
+      "end": "15:45",
+      "title": "Daily Bible Study",
+      "tags": [
+        "bible-study"
+      ],
+      "focus": 3
     }
   ]
 }
