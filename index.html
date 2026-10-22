@@ -1,0 +1,334 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Daylog</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; margin: 0 auto; padding: 16px; max-width: 640px; background: #0f1115; color: #e6e6e6; }
+  input, select, button { font: inherit; padding: 10px; border-radius: 8px; border: 1px solid #333; background: #1a1d24; color: #e6e6e6; }
+  button { background: #3b6cf6; border: none; cursor: pointer; }
+  button.ghost { background: #1a1d24; border: 1px solid #333; }
+  button.danger { background: #b03a3a; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+  .card { background: #171a21; border-radius: 12px; padding: 14px; margin: 12px 0; }
+  h3 { margin: 0 0 8px; font-size: 16px; }
+  .chip { display: inline-block; padding: 6px 12px; border-radius: 999px; border: 1px solid #3b6cf6; margin: 3px; cursor: pointer; font-size: 14px; user-select: none; }
+  .chip.on { background: #3b6cf6; color: #fff; }
+  .chip.manage { border-color: #b03a3a; }
+  .block { border-left: 4px solid #3b6cf6; padding: 8px 10px; margin: 8px 0; background: #1d2129; border-radius: 6px; }
+  .block .meta { display: flex; justify-content: space-between; gap: 8px; }
+  .tagline { font-size: 12px; color: #9ab3ff; margin-top: 4px; }
+  .muted { color: #8a8f98; font-size: 13px; }
+  .bar-wrap { background: #1d2129; border-radius: 4px; margin: 6px 0; }
+  .bar { height: 10px; background: #3b6cf6; border-radius: 4px; }
+  .hidden { display: none !important; }
+  .grow { flex: 1; min-width: 160px; }
+</style>
+</head>
+<body>
+
+<!-- SETUP -->
+<div id="setup" class="card hidden">
+  <h3>Setup (saved on this device only)</h3>
+  <div class="row"><input id="s_owner" class="grow" placeholder="GitHub username"></div>
+  <div class="row"><input id="s_repo" class="grow" placeholder="Repo name, e.g. daylog"></div>
+  <div class="row"><input id="s_token" class="grow" type="password" placeholder="Fine-grained token (Contents: read & write, this repo only)"></div>
+  <div class="row">
+    <select id="s_who" class="grow">
+      <option value="tom">Tom</option>
+      <option value="child">Child</option>
+    </select>
+  </div>
+  <div class="row"><button id="s_save">Save</button></div>
+  <p class="muted">The token is stored in this browser's localStorage. Use a token that only covers this one repo.</p>
+</div>
+
+<!-- APP -->
+<div id="app" class="hidden">
+  <div class="row">
+    <button class="ghost" id="prev">←</button>
+    <input type="date" id="date">
+    <button class="ghost" id="next">→</button>
+    <button class="ghost" id="today">Today</button>
+    <button class="ghost" id="gear">⚙</button>
+  </div>
+  <div id="status" class="muted"></div>
+
+  <div class="card">
+    <h3>Timeline</h3>
+    <div id="blocks"><span class="muted">No blocks yet for this day.</span></div>
+  </div>
+
+  <div class="card">
+    <h3>Add block</h3>
+    <div class="row">
+      <input id="start" type="time">
+      <span class="muted">to</span>
+      <input id="end" type="time">
+      <input id="focus" type="number" min="1" max="5" value="3" style="width:80px" title="Focus 1–5">
+    </div>
+    <div class="row"><input id="title" class="grow" placeholder="What did you do?"></div>
+    <div class="muted">Tags (tap to pick)</div>
+    <div id="tagpick"></div>
+    <div class="row">
+      <input id="newtag" class="grow" placeholder="New tag…">
+      <button class="ghost" id="addtag">+ Tag</button>
+      <button class="ghost" id="managetags">Edit tags</button>
+    </div>
+    <div class="row"><button id="addblock">Add block</button></div>
+  </div>
+
+  <div class="card">
+    <h3>By tag</h3>
+    <div id="summary"><span class="muted">Nothing logged yet.</span></div>
+  </div>
+</div>
+
+<script>
+const KEY = 'daylog.cfg';
+let cfg = JSON.parse(localStorage.getItem(KEY) || '{}');
+const qs = new URLSearchParams(location.search);
+if (qs.get('who')) cfg.who = qs.get('who');
+cfg.who ||= 'tom';
+
+let tags = [], tagsSha = null;
+let day = { date: '', blocks: [], sha: null };
+let picked = new Set();
+let manage = false;
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const todayStr = () => { const d = new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); };
+const toMin = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+const fromMin = m => String(Math.floor(m / 60) % 24).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+const norm = t => t.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9_-]/g, '');
+const dayPath = (who, date) => `data/${who}/${date.slice(0, 4)}/${date.slice(5, 7)}/${date}.json`;
+const tagsPath = who => `data/${who}/tags.json`;
+
+// ---------- GitHub Contents API ----------
+async function gh(path, opts = {}) {
+  return fetch(`https://api.github.com/repos/${cfg.owner}/${cfg.repo}/contents/${path}`, {
+    ...opts,
+    headers: { Authorization: `Bearer ${cfg.token}`, Accept: 'application/vnd.github+json', ...(opts.headers || {}) }
+  });
+}
+
+async function readJSON(path, fallback) {
+  const r = await gh(path);
+  if (r.status === 404) return { data: fallback, sha: null };
+  if (!r.ok) throw new Error(`read ${r.status}`);
+  const j = await r.json();
+  const bytes = Uint8Array.from(atob(j.content.replace(/\n/g, '')), c => c.charCodeAt(0));
+  return { data: JSON.parse(new TextDecoder().decode(bytes)), sha: j.sha };
+}
+
+async function writeJSON(path, data, sha, msg) {
+  const bytes = new TextEncoder().encode(JSON.stringify(data, null, 2));
+  let bin = ''; bytes.forEach(b => bin += String.fromCharCode(b));
+  const body = { message: msg, content: btoa(bin) };
+  if (sha) body.sha = sha;
+  const r = await gh(path, { method: 'PUT', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } });
+  if (r.status === 409) throw new Error('conflict: reload and retry');
+  if (!r.ok) throw new Error(`save ${r.status}`);
+  return (await r.json()).content.sha;
+}
+
+// ---------- Load / save ----------
+async function loadTags() {
+  const r = await readJSON(tagsPath(cfg.who), []);
+  tags = r.data; tagsSha = r.sha;
+}
+
+async function persistTags(msg = 'tags: update') {
+  tagsSha = await writeJSON(tagsPath(cfg.who), tags, tagsSha, msg);
+}
+
+async function loadDay() {
+  $('status').textContent = 'Loading…';
+  try {
+    await loadTags();
+    const r = await readJSON(dayPath(cfg.who, day.date), null);
+    day = r.data
+      ? { date: day.date, blocks: r.data.blocks || [], sha: r.sha }
+      : { date: day.date, blocks: [], sha: null };
+    $('status').textContent = 'Synced';
+  } catch (e) {
+    $('status').textContent = 'Error: ' + e.message;
+  }
+  render();
+  setDefaultTimes();
+}
+
+async function persistDay(msg) {
+  day.sha = await writeJSON(dayPath(cfg.who, day.date),
+    { date: day.date, who: cfg.who, blocks: day.blocks }, day.sha, msg);
+}
+
+// ---------- Tags ----------
+function allTags() {
+  const used = new Set(day.blocks.flatMap(b => b.tags || []));
+  return [...new Set([...tags, ...used])];
+}
+
+function renderTags() {
+  const wrap = $('tagpick');
+  const list = allTags();
+  if (!list.length) { wrap.innerHTML = '<span class="muted">No tags yet — add one below.</span>'; return; }
+  wrap.innerHTML = list.map(t =>
+    `<span class="chip ${picked.has(t) ? 'on' : ''} ${manage ? 'manage' : ''}" data-tag="${esc(t)}">${manage ? '✕ ' : ''}${esc(t)}</span>`
+  ).join('');
+  wrap.querySelectorAll('.chip').forEach(el => el.onclick = () => onChipClick(el.dataset.tag));
+  $('managetags').textContent = manage ? 'Done' : 'Edit tags';
+}
+
+async function onChipClick(t) {
+  if (manage) {
+    if (!confirm(`Delete tag "${t}" from the list? Existing blocks keep it.`)) return;
+    tags = tags.filter(x => x !== t);
+    picked.delete(t);
+    try { await persistTags(`tags: remove ${t}`); } catch (e) { alert(e.message); }
+    renderTags();
+    return;
+  }
+  picked.has(t) ? picked.delete(t) : picked.add(t);
+  renderTags();
+}
+
+async function createTag() {
+  const t = norm($('newtag').value);
+  if (!t) return;
+  if (!tags.includes(t)) {
+    tags.push(t);
+    try { await persistTags(`tags: add ${t}`); } catch (e) { tags.pop(); return alert(e.message); }
+  }
+  picked.add(t);
+  $('newtag').value = '';
+  renderTags();
+}
+
+// ---------- Blocks ----------
+function setDefaultTimes() {
+  const last = day.blocks[day.blocks.length - 1];
+  const start = last ? last.end : '09:00';
+  const endMin = Math.min(toMin(start) + 30, 24 * 60 - 1);
+  $('start').value = start;
+  $('end').value = fromMin(endMin);
+}
+
+async function addBlock() {
+  const s = $('start').value, e = $('end').value;
+  const title = $('title').value.trim();
+  if (!title) return alert('Add a title first');
+  if (!s || !e || e <= s) return alert('End must be after start');
+  const clash = day.blocks.find(b => s < b.end && e > b.start);
+  if (clash) return alert(`Overlaps "${clash.title}" (${clash.start}–${clash.end})`);
+
+  const blk = { start: s, end: e, title, tags: [...picked], focus: Math.min(5, Math.max(1, +$('focus').value || 3)) };
+  day.blocks.push(blk);
+  day.blocks.sort((a, b) => a.start.localeCompare(b.start));
+  try {
+    await persistDay('block: ' + title);
+  } catch (err) {
+    day.blocks = day.blocks.filter(b => b !== blk);
+    return alert(err.message);
+  }
+  picked.clear();
+  $('title').value = '';
+  render(); setDefaultTimes();
+}
+
+async function deleteBlock(i) {
+  if (!confirm(`Delete "${day.blocks[i].title}"?`)) return;
+  const removed = day.blocks.splice(i, 1)[0];
+  try { await persistDay('block: delete ' + removed.title); }
+  catch (err) { day.blocks.splice(i, 0, removed); alert(err.message); }
+  render();
+}
+
+function render() {
+  const b = $('blocks');
+  b.innerHTML = day.blocks.length ? day.blocks.map((x, i) => `
+    <div class="block">
+      <div class="meta">
+        <strong>${esc(x.start)}–${esc(x.end)}</strong>
+        <span class="muted">focus ${x.focus ?? '-'} · ${Math.round((toMin(x.end) - toMin(x.start)))} min
+          <button class="ghost" style="padding:2px 8px;margin-left:6px" data-del="${i}">✕</button></span>
+      </div>
+      <div>${esc(x.title)}</div>
+      <div class="tagline">${(x.tags || []).map(esc).join(' · ') || '<span class="muted">untagged</span>'}</div>
+    </div>`).join('')
+    : '<span class="muted">No blocks yet for this day.</span>';
+  b.querySelectorAll('[data-del]').forEach(el => el.onclick = () => deleteBlock(+el.dataset.del));
+
+  renderTags();
+  renderSummary();
+}
+
+function renderSummary() {
+  const totals = {};
+  for (const b of day.blocks) {
+    const mins = toMin(b.end) - toMin(b.start);
+    const ts = b.tags?.length ? b.tags : ['untagged'];
+    for (const t of ts) totals[t] = (totals[t] || 0) + mins;
+  }
+  const entries = Object.entries(totals).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) { $('summary').innerHTML = '<span class="muted">Nothing logged yet.</span>'; return; }
+  const max = entries[0][1];
+  $('summary').innerHTML = entries.map(([t, m]) => `
+    <div><span>${esc(t)}</span> <span class="muted">${(m / 60).toFixed(1)} h</span>
+      <div class="bar-wrap"><div class="bar" style="width:${(m / max * 100).toFixed(0)}%"></div></div></div>`).join('');
+}
+
+// ---------- Navigation & setup ----------
+function setDate(d) {
+  day.date = d;
+  $('date').value = d;
+  loadDay();
+}
+
+function shiftDay(n) {
+  const d = new Date(day.date + 'T00:00:00');
+  d.setDate(d.getDate() + n);
+  setDate(d.toISOString().slice(0, 10));
+}
+
+function showSetup(show) {
+  $('setup').classList.toggle('hidden', !show);
+  $('app').classList.toggle('hidden', show);
+  if (show) {
+    $('s_owner').value = cfg.owner || '';
+    $('s_repo').value = cfg.repo || '';
+    $('s_token').value = cfg.token || '';
+    $('s_who').value = cfg.who || 'tom';
+  }
+}
+
+$('s_save').onclick = () => {
+  cfg = { owner: $('s_owner').value.trim(), repo: $('s_repo').value.trim(), token: $('s_token').value.trim(), who: $('s_who').value };
+  localStorage.setItem(KEY, JSON.stringify(cfg));
+  showSetup(false);
+  setDate(day.date || todayStr());
+};
+$('gear').onclick = () => showSetup(true);
+$('prev').onclick = () => shiftDay(-1);
+$('next').onclick = () => shiftDay(1);
+$('today').onclick = () => setDate(todayStr());
+$('date').onchange = e => setDate(e.target.value);
+$('addtag').onclick = createTag;
+$('newtag').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); createTag(); } };
+$('addblock').onclick = addBlock;
+$('managetags').onclick = () => { manage = !manage; renderTags(); };
+
+// ---------- Boot ----------
+if (!cfg.owner || !cfg.repo || !cfg.token) {
+  showSetup(true);
+} else {
+  showSetup(false);
+  setDate(todayStr());
+}
+</script>
+</body>
+</html>
