@@ -64,6 +64,15 @@
         "options-theory"
       ],
       "focus": 3
+    },
+    {
+      "start": "16:30",
+      "end": "17:00",
+      "title": "cooking dinner",
+      "tags": [
+        "admin"
+      ],
+      "focus": 3
     }
   ]
 }
