@@ -75,7 +75,7 @@
   </div>
 
   <div class="card">
-    <h3>Add block</h3>
+    <h3 id="formTitle">Add block</h3>
     <div class="row">
       <input id="start" type="time">
       <span class="muted">to</span>
@@ -90,7 +90,7 @@
       <button class="ghost" id="addtag">+ Tag</button>
       <button class="ghost" id="managetags">Edit tags</button>
     </div>
-    <div class="row"><button id="addblock">Add block</button></div>
+    <div class="row"><button id="addblock">Add block</button><button class="ghost hidden" id="cancelEdit">Cancel</button></div>
   </div>
 
   <div class="card">
@@ -126,6 +126,8 @@ let tags = [], tagsSha = null;
 let day = { date: '', blocks: [], sha: null };
 let picked = new Set();
 let manage = false;
+let editIndex = null;
+let pendingEdit = null;
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -175,6 +177,7 @@ async function persistTags(msg = 'tags: update') {
 }
 
 async function loadDay() {
+  if (editIndex !== null) cancelEdit();
   $('status').textContent = 'Loading…';
   try {
     await loadTags();
@@ -188,6 +191,11 @@ async function loadDay() {
   }
   render();
   setDefaultTimes();
+  if (pendingEdit) {
+    const idx = day.blocks.findIndex(b => b.start === pendingEdit.start && b.title === pendingEdit.title);
+    pendingEdit = null;
+    if (idx !== -1) startEdit(idx);
+  }
 }
 
 async function persistDay(msg) {
@@ -247,30 +255,59 @@ function setDefaultTimes() {
   $('end').value = fromMin(endMin);
 }
 
-async function addBlock() {
+async function saveBlock() {
   const s = $('start').value, e = $('end').value;
   const title = $('title').value.trim();
   if (!title) return alert('Add a title first');
   if (!s || !e || e <= s) return alert('End must be after start');
-  const clash = day.blocks.find(b => s < b.end && e > b.start);
+  const clash = day.blocks.find((b, k) => k !== editIndex && s < b.end && e > b.start);
   if (clash) return alert(`Overlaps "${clash.title}" (${clash.start}–${clash.end})`);
 
   const blk = { start: s, end: e, title, tags: [...picked], focus: Math.min(5, Math.max(1, +$('focus').value || 3)) };
-  day.blocks.push(blk);
+  const before = day.blocks.slice();
+  if (editIndex !== null) day.blocks[editIndex] = blk;
+  else day.blocks.push(blk);
   day.blocks.sort((a, b) => a.start.localeCompare(b.start));
   try {
-    await persistDay('block: ' + title);
+    await persistDay((editIndex !== null ? 'block: edit ' : 'block: ') + title);
   } catch (err) {
-    day.blocks = day.blocks.filter(b => b !== blk);
+    day.blocks = before;
     return alert(err.message);
   }
+  cancelEdit();
+  render();
+}
+
+function startEdit(i) {
+  const b = day.blocks[i];
+  if (!b) return;
+  editIndex = i;
+  $('start').value = b.start;
+  $('end').value = b.end;
+  $('title').value = b.title;
+  $('focus').value = b.focus ?? 3;
+  picked = new Set(b.tags || []);
+  $('formTitle').textContent = 'Edit block';
+  $('addblock').textContent = 'Save changes';
+  $('cancelEdit').classList.remove('hidden');
+  renderTags();
+  $('title').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function cancelEdit() {
+  editIndex = null;
   picked.clear();
   $('title').value = '';
-  render(); setDefaultTimes();
+  $('formTitle').textContent = 'Add block';
+  $('addblock').textContent = 'Add block';
+  $('cancelEdit').classList.add('hidden');
+  renderTags();
+  setDefaultTimes();
 }
 
 async function deleteBlock(i) {
   if (!confirm(`Delete "${day.blocks[i].title}"?`)) return;
+  if (editIndex !== null) cancelEdit();
   const removed = day.blocks.splice(i, 1)[0];
   try { await persistDay('block: delete ' + removed.title); }
   catch (err) { day.blocks.splice(i, 0, removed); alert(err.message); }
@@ -280,7 +317,7 @@ async function deleteBlock(i) {
 function render() {
   const b = $('blocks');
   b.innerHTML = day.blocks.length ? day.blocks.map((x, i) => `
-    <div class="block">
+    <div class="block" data-edit="${i}">
       <div class="meta">
         <strong>${esc(x.start)}–${esc(x.end)}</strong>
         <span class="muted">focus ${x.focus ?? '-'} · ${Math.round((toMin(x.end) - toMin(x.start)))} min
@@ -290,7 +327,8 @@ function render() {
       <div class="tagline">${(x.tags || []).map(esc).join(' · ') || '<span class="muted">untagged</span>'}</div>
     </div>`).join('')
     : '<span class="muted">No blocks yet for this day.</span>';
-  b.querySelectorAll('[data-del]').forEach(el => el.onclick = () => deleteBlock(+el.dataset.del));
+  b.querySelectorAll('[data-del]').forEach(el => el.onclick = e => { e.stopPropagation(); deleteBlock(+el.dataset.del); });
+  b.querySelectorAll('[data-edit]').forEach(el => el.onclick = () => startEdit(+el.dataset.edit));
 
   renderTags();
   renderSummary();
@@ -349,7 +387,8 @@ $('today').onclick = () => setDate(todayStr());
 $('date').onchange = e => setDate(e.target.value);
 $('addtag').onclick = createTag;
 $('newtag').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); createTag(); } };
-$('addblock').onclick = addBlock;
+$('addblock').onclick = saveBlock;
+$('cancelEdit').onclick = cancelEdit;
 $('managetags').onclick = () => { manage = !manage; renderTags(); };
 
 // ---------- Week view ----------
@@ -449,8 +488,12 @@ function showDetail(date, b) {
     <h3>${esc(b.title)}</h3>
     <div class="muted">${dayName(date)} ${fmtShort(date)} · ${esc(b.start)}–${esc(b.end)} · ${Math.round(toMin(b.end) - toMin(b.start))} min · focus ${b.focus ?? '-'}</div>
     <div class="tagline">${(b.tags || []).map(esc).join(' · ') || 'untagged'}</div>
-    <div class="row"><button class="ghost" id="wOpen">Open in day view</button></div>`;
-  $('wOpen').onclick = () => { showWeek(false); setDate(date); };
+    <div class="row"><button class="ghost" id="wOpen">Edit in day view</button></div>`;
+  $('wOpen').onclick = () => {
+    pendingEdit = { start: b.start, title: b.title };
+    showWeek(false);
+    setDate(date);
+  };
 }
 
 function showWeek(on) {
