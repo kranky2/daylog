@@ -26,6 +26,17 @@
   .bar { height: 10px; background: #3b6cf6; border-radius: 4px; }
   .hidden { display: none !important; }
   .grow { flex: 1; min-width: 160px; }
+  #weekGrid { overflow-y: auto; max-height: 65vh; border-radius: 12px; background: #171a21; margin-top: 8px; }
+  .gridwrap .heads, .gridwrap .body { display: grid; grid-template-columns: 52px repeat(var(--n), 1fr); }
+  .gridwrap .heads { position: sticky; top: 0; background: #171a21; z-index: 2; border-bottom: 1px solid #2a2e37; }
+  .dh { text-align: center; padding: 6px 2px; font-size: 13px; overflow: hidden; }
+  .dh small { color: #8a8f98; font-size: 11px; }
+  .gridwrap .body { position: relative; }
+  .gut .hr { font-size: 11px; color: #8a8f98; text-align: right; padding-right: 6px; box-sizing: border-box; border-top: 1px solid #2a2e37; }
+  .col { position: relative; border-left: 1px solid #2a2e37;
+         background-image: repeating-linear-gradient(to bottom, transparent 0, transparent 39px, #2a2e37 39px, #2a2e37 40px); }
+  .ev { position: absolute; border-radius: 6px; padding: 2px 4px; font-size: 11px; color: #fff; overflow: hidden;
+        box-sizing: border-box; border: 1px solid #0f1115; cursor: pointer; line-height: 1.2; }
 </style>
 </head>
 <body>
@@ -53,6 +64,7 @@
     <input type="date" id="date">
     <button class="ghost" id="next">→</button>
     <button class="ghost" id="today">Today</button>
+    <button class="ghost" id="weekTab">Week</button>
     <button class="ghost" id="gear">⚙</button>
   </div>
   <div id="status" class="muted"></div>
@@ -85,6 +97,22 @@
     <h3>By tag</h3>
     <div id="summary"><span class="muted">Nothing logged yet.</span></div>
   </div>
+</div>
+
+<!-- WEEK VIEW -->
+<div id="weekApp" class="hidden">
+  <div class="row">
+    <button class="ghost" id="wPrev">←</button>
+    <div id="weekTitle" class="grow" style="text-align:center;font-weight:600"></div>
+    <button class="ghost" id="wNext">→</button>
+  </div>
+  <div class="row">
+    <button class="ghost" id="wToday">This week</button>
+    <button class="ghost" id="wDay">Day view</button>
+    <span id="weekStatus" class="muted"></span>
+  </div>
+  <div id="weekGrid"></div>
+  <div class="card" id="weekDetail"><span class="muted">Tap a block to see details.</span></div>
 </div>
 
 <script>
@@ -163,6 +191,7 @@ async function loadDay() {
 }
 
 async function persistDay(msg) {
+  delete WK.cache[day.date];
   day.sha = await writeJSON(dayPath(cfg.who, day.date),
     { date: day.date, who: cfg.who, blocks: day.blocks }, day.sha, msg);
 }
@@ -298,6 +327,7 @@ function shiftDay(n) {
 function showSetup(show) {
   $('setup').classList.toggle('hidden', !show);
   $('app').classList.toggle('hidden', show);
+  $('weekApp').classList.add('hidden');
   if (show) {
     $('s_owner').value = cfg.owner || '';
     $('s_repo').value = cfg.repo || '';
@@ -321,6 +351,133 @@ $('addtag').onclick = createTag;
 $('newtag').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); createTag(); } };
 $('addblock').onclick = addBlock;
 $('managetags').onclick = () => { manage = !manage; renderTags(); };
+
+// ---------- Week view ----------
+const HOUR_PX = 40;
+const WK = { anchor: null, cache: {} };
+const isPhone = () => window.innerWidth < 700;
+const dayCount = () => (isPhone() ? 3 : 7);
+const addDays = (s, n) => { const d = new Date(s + 'T00:00:00'); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
+const mondayOf = s => { const dow = (new Date(s + 'T00:00:00').getDay() + 6) % 7; return addDays(s, -dow); };
+const dayName = s => new Date(s + 'T00:00:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric' });
+const fmtShort = s => new Date(s + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+const tagHue = t => { let h = 0; for (const c of t) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
+const blockColor = b => (b.tags && b.tags.length ? `hsl(${tagHue(b.tags[0])},60%,42%)` : '#4a4f5a');
+
+async function loadDayBlocks(date) {
+  if (WK.cache[date]) return WK.cache[date];
+  const r = await readJSON(dayPath(cfg.who, date), null);
+  WK.cache[date] = r.data ? (r.data.blocks || []) : [];
+  return WK.cache[date];
+}
+
+// Assign overlapping blocks to side-by-side lanes, like Google Calendar.
+function layout(blocks) {
+  const idx = blocks.map((_, i) => i).sort((a, b) => toMin(blocks[a].start) - toMin(blocks[b].start));
+  const res = new Array(blocks.length);
+  let cluster = [], clusterEnd = -1;
+  const laneEnds = [];
+  const flush = () => {
+    const L = Math.max(1, ...cluster.map(c => c.lane + 1));
+    cluster.forEach(c => res[c.i] = { lane: c.lane, lanes: L });
+    cluster = []; laneEnds.length = 0;
+  };
+  for (const i of idx) {
+    const s = toMin(blocks[i].start), e = toMin(blocks[i].end);
+    if (cluster.length && s >= clusterEnd) flush();
+    let lane = laneEnds.findIndex(le => le <= s);
+    if (lane === -1) { lane = laneEnds.length; laneEnds.push(e); } else laneEnds[lane] = e;
+    cluster.push({ i, lane });
+    clusterEnd = Math.max(clusterEnd, e);
+  }
+  if (cluster.length) flush();
+  return res;
+}
+
+function dayHead(date, blocks) {
+  const tot = {}; let mins = 0;
+  for (const b of blocks) {
+    const m = toMin(b.end) - toMin(b.start);
+    mins += m;
+    for (const t of (b.tags || [])) tot[t] = (tot[t] || 0) + m;
+  }
+  const top = Object.entries(tot).sort((a, b) => b[1] - a[1])[0];
+  return `<div class="dh">${dayName(date)}<br><small>${(mins / 60).toFixed(1)} h${top ? ' · ' + esc(top[0]) : ''}</small></div>`;
+}
+
+async function renderWeek() {
+  const n = dayCount();
+  const dates = Array.from({ length: n }, (_, i) => addDays(WK.anchor, i));
+  $('weekTitle').textContent = `${fmtShort(dates[0])} – ${fmtShort(dates[n - 1])}`;
+  $('weekStatus').textContent = 'Loading…';
+  let all;
+  try {
+    all = await Promise.all(dates.map(loadDayBlocks));
+    $('weekStatus').textContent = 'Synced';
+  } catch (e) {
+    $('weekStatus').textContent = 'Error: ' + e.message;
+    return;
+  }
+
+  const hours = Array.from({ length: 24 }, (_, h) =>
+    `<div class="hr" style="height:${HOUR_PX}px">${String(h).padStart(2, '0')}:00</div>`).join('');
+
+  const heads = dates.map((d, i) => dayHead(d, all[i])).join('');
+  const cols = dates.map((d, i) => {
+    const blocks = all[i];
+    const lanes = layout(blocks);
+    const cards = blocks.map((b, j) => {
+      const top = toMin(b.start) / 60 * HOUR_PX;
+      const h = (toMin(b.end) - toMin(b.start)) / 60 * HOUR_PX;
+      const { lane, lanes: L } = lanes[j];
+      return `<div class="ev" data-i="${i}" data-j="${j}"
+        style="top:${top}px;height:${Math.max(h, 14)}px;left:${lane / L * 100}%;width:${100 / L}%;background:${blockColor(b)}">${esc(b.title)}</div>`;
+    }).join('');
+    return `<div class="col" style="height:${24 * HOUR_PX}px">${cards}</div>`;
+  }).join('');
+
+  $('weekGrid').innerHTML = `
+    <div class="gridwrap" style="--n:${n}">
+      <div class="heads"><div></div>${heads}</div>
+      <div class="body"><div class="gut">${hours}</div>${cols}</div>
+    </div>`;
+  $('weekGrid').scrollTop = 7 * HOUR_PX;
+}
+
+function showDetail(date, b) {
+  $('weekDetail').innerHTML = `
+    <h3>${esc(b.title)}</h3>
+    <div class="muted">${dayName(date)} ${fmtShort(date)} · ${esc(b.start)}–${esc(b.end)} · ${Math.round(toMin(b.end) - toMin(b.start))} min · focus ${b.focus ?? '-'}</div>
+    <div class="tagline">${(b.tags || []).map(esc).join(' · ') || 'untagged'}</div>
+    <div class="row"><button class="ghost" id="wOpen">Open in day view</button></div>`;
+  $('wOpen').onclick = () => { showWeek(false); setDate(date); };
+}
+
+function showWeek(on) {
+  $('app').classList.toggle('hidden', on);
+  $('weekApp').classList.toggle('hidden', !on);
+  if (on) {
+    WK.cache = {};
+    WK.anchor = isPhone() ? day.date : mondayOf(day.date);
+    renderWeek();
+  }
+}
+
+$('weekTab').onclick = () => showWeek(true);
+$('wDay').onclick = () => showWeek(false);
+$('wPrev').onclick = () => { WK.anchor = addDays(WK.anchor, -dayCount()); renderWeek(); };
+$('wNext').onclick = () => { WK.anchor = addDays(WK.anchor, dayCount()); renderWeek(); };
+$('wToday').onclick = () => { const t = todayStr(); WK.anchor = isPhone() ? t : mondayOf(t); renderWeek(); };
+$('weekGrid').onclick = e => {
+  const el = e.target.closest('.ev');
+  if (!el) return;
+  const date = addDays(WK.anchor, +el.dataset.i);
+  const b = (WK.cache[date] || [])[+el.dataset.j];
+  if (b) showDetail(date, b);
+};
+window.addEventListener('resize', () => {
+  if (!$('weekApp').classList.contains('hidden')) renderWeek();
+});
 
 // ---------- Boot ----------
 if (!cfg.owner || !cfg.repo || !cfg.token) {
