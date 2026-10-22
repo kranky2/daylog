@@ -73,6 +73,15 @@
         "admin"
       ],
       "focus": 3
+    },
+    {
+      "start": "17:00",
+      "end": "21:30",
+      "title": "Kids time, dinner, play, sleep",
+      "tags": [
+        "kids-time"
+      ],
+      "focus": 3
     }
   ]
 }
